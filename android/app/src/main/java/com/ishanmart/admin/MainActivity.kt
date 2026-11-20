@@ -41,7 +41,7 @@ class MainActivity : ComponentActivity() {
         if (FirebaseApp.getApps(this).isEmpty()) {
             val options = FirebaseOptions.Builder()
                 .setApiKey("AIzaSyDci6dFkW3Sgfx8fzGjEYPQPbhG7EuwpXE")
-                .setApplicationId("1:807194530965:android:de67c1361adfe1b2c7b79c")
+                .setApplicationId("1:807194530965:web:de67c1361adfe1b2c7b79c")
                 .setProjectId("ishan-mart")
                 .setStorageBucket("ishan-mart.firebasestorage.app")
                 .setGcmSenderId("807194530965").build()
@@ -303,27 +303,24 @@ private fun changeOrderStatus(db: FirebaseFirestore, order: Order, status: Strin
         val snapshot = tx.get(ref)
         val deducted = snapshot.getBoolean("stockDeducted") ?: false
         val restored = snapshot.getBoolean("stockRestored") ?: false
-        if (status == "Accepted" && !deducted) {
+        val shouldDeduct = status == "Accepted" && !deducted
+        val shouldRestore = status == "Cancelled" && deducted && !restored
+        val stockChanges = mutableListOf<Pair<com.google.firebase.firestore.DocumentReference, Long>>()
+        if (shouldDeduct || shouldRestore) {
             order.items.forEach { item ->
                 val productId = item["productId"]?.toString() ?: return@forEach
                 val quantity = (item["quantity"] as? Number)?.toLong() ?: (item["qty"] as? Number)?.toLong() ?: 1L
                 val productRef = db.collection("products").document(productId)
                 val product = tx.get(productRef)
                 val available = product.getLong("stock") ?: 0L
-                if (available < quantity) throw IllegalStateException("Not enough stock for " + (item["name"] ?: "an item"))
-                tx.update(productRef, "stock", available - quantity)
+                if (shouldDeduct && available < quantity) throw IllegalStateException("Not enough stock for " + (item["name"] ?: "an item"))
+                stockChanges.add(productRef to if (shouldDeduct) available - quantity else available + quantity)
             }
-            tx.update(ref, mapOf("status" to status, "stockDeducted" to true))
-        } else if (status == "Cancelled" && deducted && !restored) {
-            order.items.forEach { item ->
-                val productId = item["productId"]?.toString() ?: return@forEach
-                val quantity = (item["quantity"] as? Number)?.toLong() ?: (item["qty"] as? Number)?.toLong() ?: 1L
-                val productRef = db.collection("products").document(productId)
-                val product = tx.get(productRef)
-                tx.update(productRef, "stock", (product.getLong("stock") ?: 0L) + quantity)
-            }
-            tx.update(ref, mapOf("status" to status, "stockRestored" to true))
-        } else tx.update(ref, "status", status)
+        }
+        stockChanges.forEach { change -> tx.update(change.first, "stock", change.second) }
+        if (shouldDeduct) tx.update(ref, mapOf("status" to status, "stockDeducted" to true))
+        else if (shouldRestore) tx.update(ref, mapOf("status" to status, "stockRestored" to true))
+        else tx.update(ref, "status", status)
         null
     }.addOnSuccessListener { result("Order updated: " + status) }.addOnFailureListener { result(it.localizedMessage ?: "Could not update order.") }
 }
